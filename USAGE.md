@@ -8,8 +8,9 @@ This guide provides comprehensive usage examples for the Audio Interrogator tool
 2. [Filtering by Card](#filtering-by-card)
 3. [Filtering by Device Name](#filtering-by-device-name)
 4. [Output Formats](#output-formats)
-5. [Advanced Examples](#advanced-examples)
-6. [Troubleshooting Common Issues](#troubleshooting-common-issues)
+5. [System Integration Options](#system-integration-options)
+6. [Advanced Examples](#advanced-examples)
+7. [Troubleshooting Common Issues](#troubleshooting-common-issues)
 
 ## Basic Usage
 
@@ -182,6 +183,46 @@ audio-interrogator --all --verbose
 audio-interrogator --device "Scarlett" --json
 ```
 
+## System Integration Options
+
+### Non-Intrusive Mode
+
+When working with active audio streams or in production environments, use the `--no-proc` flag to prevent the tool from accessing `/proc/asound`, which could potentially interfere with running audio applications:
+
+```bash
+# Safe mode - won't interfere with active audio streams
+audio-interrogator --no-proc
+
+# Combined with other flags
+audio-interrogator --no-proc --card Audio --verbose
+audio-interrogator --no-proc --json --device "Scarlett"
+```
+
+**When to use `--no-proc`:**
+- During live audio recording or playback sessions
+- In production environments where audio stability is critical
+- When investigating audio issues without disrupting current streams
+- In automated monitoring scripts that run frequently
+
+**Trade-offs:**
+- Provides less detailed information about device usage status
+- Some advanced device state information may not be available
+- Still provides full device capability information through ALSA/CPAL APIs
+
+### Production Environment Examples
+
+```bash
+# Monitoring script that won't disrupt audio
+#!/bin/bash
+audio-interrogator --no-proc --json > /var/log/audio-devices.json
+
+# Check device availability without interrupting streams
+audio-interrogator --no-proc --device "Model 12" --verbose
+
+# Safe system health check
+audio-interrogator --no-proc --all --json | jq '.total_devices'
+```
+
 ## Advanced Examples
 
 ### Studio Setup Analysis
@@ -313,19 +354,27 @@ audio-interrogator --all | grep -E "(dmix|dsnoop|pulse)"
 ### System Integration Examples
 
 ```bash
-# Generate system report
+# Generate system report (safe for production use)
 {
     echo "Audio System Report - $(date)"
     echo "================================="
     audio-interrogator --list
     echo ""
-    audio-interrogator --all --verbose
+    audio-interrogator --no-proc --all --verbose
 } > audio_system_report.txt
 
-# Check for changes in audio setup
-audio-interrogator --json > current_audio.json
+# Check for changes in audio setup (non-intrusive)
+audio-interrogator --no-proc --json > current_audio.json
 # Compare with previous snapshot
 diff previous_audio.json current_audio.json
+
+# Monitoring script for production environments
+#!/bin/bash
+# Safe audio device monitoring that won't interfere with streams
+while true; do
+    audio-interrogator --no-proc --json > /tmp/audio-status.json
+    sleep 60
+done
 ```
 
 This usage guide covers the most common scenarios for using Audio Interrogator. For additional help, use `audio-interrogator --help` or refer to the README.md file.

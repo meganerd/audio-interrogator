@@ -135,15 +135,17 @@ fn get_cpal_devices() -> Result<Vec<AudioDeviceInfo>> {
 }
 
 #[cfg(target_os = "linux")]
-fn get_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
+fn get_alsa_devices(no_proc: bool) -> Result<Vec<AudioDeviceInfo>> {
     use alsa::{PCM, Direction};
     use alsa::pcm::{HwParams, Access, Format};
 
     let mut devices = Vec::new();
 
-    // First get devices from /proc/asound to include in-use devices
-    if let Ok(proc_devices) = get_proc_alsa_devices() {
-        devices.extend(proc_devices);
+    // Get in-use device information without disrupting audio streams (if enabled)
+    if !no_proc {
+        if let Ok(proc_devices) = get_proc_alsa_devices_safe() {
+            devices.extend(proc_devices);
+        }
     }
 
     // Common ALSA device names to check for additional devices
@@ -249,11 +251,11 @@ fn get_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn get_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
+fn get_alsa_devices(_no_proc: bool) -> Result<Vec<AudioDeviceInfo>> {
     Ok(Vec::new()) // ALSA is Linux-specific
 }
 
-fn get_system_audio_info() -> Result<SystemAudioInfo> {
+fn get_system_audio_info(no_proc: bool) -> Result<SystemAudioInfo> {
     let mut all_devices = Vec::new();
 
     // Get CPAL devices (cross-platform)
@@ -264,7 +266,7 @@ fn get_system_audio_info() -> Result<SystemAudioInfo> {
 
     // Get ALSA devices (Linux-specific)
     #[cfg(target_os = "linux")]
-    match get_alsa_devices() {
+    match get_alsa_devices(no_proc) {
         Ok(mut alsa_devices) => all_devices.append(&mut alsa_devices),
         Err(e) => eprintln!("Warning: Failed to get ALSA devices: {}", e),
     }
@@ -342,6 +344,10 @@ fn main() -> Result<()> {
             .long("list")
             .action(clap::ArgAction::SetTrue)
             .help("List available card IDs and exit (cards are shown by default)"))
+        .arg(Arg::new("no-proc")
+            .long("no-proc")
+            .action(clap::ArgAction::SetTrue)
+            .help("Disable /proc/asound access to prevent interfering with active audio streams"))
         .get_matches();
 
     let json_output = matches.get_flag("json");
@@ -350,6 +356,7 @@ fn main() -> Result<()> {
     let card_filter = matches.get_one::<String>("card");
     let device_filter = matches.get_one::<String>("device");
     let list_cards = matches.get_flag("list-cards");
+    let no_proc = matches.get_flag("no-proc");
 
     // Handle list-cards mode
     if list_cards {
@@ -361,7 +368,7 @@ fn main() -> Result<()> {
         println!("🎵 Audio Interrogator - Scanning system audio devices...\n");
     }
 
-    let mut system_info = get_system_audio_info()?;
+    let mut system_info = get_system_audio_info(no_proc)?;
 
     // Apply filters
     if !show_all {
@@ -561,7 +568,7 @@ fn get_card_descriptions() -> Result<HashMap<String, String>> {
 }
 
 #[cfg(target_os = "linux")]
-fn get_proc_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
+fn get_proc_alsa_devices_safe() -> Result<Vec<AudioDeviceInfo>> {
     use std::fs;
 
 
@@ -585,13 +592,13 @@ fn get_proc_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
                                     if let Some(pcm_str) = pcm_name.to_str() {
                                         // Check for playback devices (pcmXp)
                                         if pcm_str.starts_with("pcm") && pcm_str.ends_with("p") {
-                                            if let Some(device_info) = read_pcm_info(&card_path, pcm_str, "PLAYBACK", card_num) {
+                                            if let Some(device_info) = read_pcm_info_safe(&card_path, pcm_str, "PLAYBACK", card_num) {
                                                 devices.push(device_info);
                                             }
                                         }
                                         // Check for capture devices (pcmXc)
                                         if pcm_str.starts_with("pcm") && pcm_str.ends_with("c") {
-                                            if let Some(device_info) = read_pcm_info(&card_path, pcm_str, "CAPTURE", card_num) {
+                                            if let Some(device_info) = read_pcm_info_safe(&card_path, pcm_str, "CAPTURE", card_num) {
                                                 devices.push(device_info);
                                             }
                                         }
@@ -609,7 +616,7 @@ fn get_proc_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_pcm_info(card_path: &str, pcm_dir: &str, stream_type: &str, card_num: &str) -> Option<AudioDeviceInfo> {
+fn read_pcm_info_safe(card_path: &str, pcm_dir: &str, stream_type: &str, card_num: &str) -> Option<AudioDeviceInfo> {
     use std::fs;
 
     let info_path = format!("{}/{}/info", card_path, pcm_dir);
@@ -630,12 +637,19 @@ fn read_pcm_info(card_path: &str, pcm_dir: &str, stream_type: &str, card_num: &s
         let device_name = format!("hw:{},{}", card_num, device_num);
         let mut device = AudioDeviceInfo::new(device_name, "ALSA".to_string());
 
-        // Determine channels from stream info if available
+        // Try to get channel info from stream0 file (read-only, non-invasive)
         if let Ok(stream_content) = fs::read_to_string(&stream_path) {
-            if let Some(channels) = parse_stream_channels(&stream_content, stream_type) {
+            if let Some(channels) = parse_stream_channels_safe(&stream_content, stream_type) {
                 match stream_type {
                     "PLAYBACK" => device.output_channels = channels,
                     "CAPTURE" => device.input_channels = channels,
+                    _ => {}
+                }
+            } else {
+                // If we can't parse channels from stream, use conservative defaults
+                match stream_type {
+                    "PLAYBACK" => device.output_channels = 2,
+                    "CAPTURE" => device.input_channels = 2,
                     _ => {}
                 }
             }
@@ -650,7 +664,7 @@ fn read_pcm_info(card_path: &str, pcm_dir: &str, stream_type: &str, card_num: &s
 
         device.update_device_type();
 
-        // Check if device is in use
+        // Check if device is in use (read-only check)
         let in_use = info_content.contains("subdevices_avail: 0") &&
                     info_content.contains("subdevices_count: 1");
 
@@ -665,7 +679,7 @@ fn read_pcm_info(card_path: &str, pcm_dir: &str, stream_type: &str, card_num: &s
 }
 
 #[cfg(target_os = "linux")]
-fn parse_stream_channels(stream_content: &str, stream_type: &str) -> Option<u32> {
+fn parse_stream_channels_safe(stream_content: &str, stream_type: &str) -> Option<u32> {
     let section_start = if stream_type == "PLAYBACK" {
         "Playback:"
     } else {
@@ -689,7 +703,7 @@ fn parse_stream_channels(stream_content: &str, stream_type: &str) -> Option<u32>
 }
 
 #[cfg(not(target_os = "linux"))]
-fn get_proc_alsa_devices() -> Result<Vec<AudioDeviceInfo>> {
+fn get_proc_alsa_devices_safe() -> Result<Vec<AudioDeviceInfo>> {
     Ok(Vec::new())
 }
 
