@@ -314,40 +314,54 @@ fn main() -> Result<()> {
         .version("0.1.0")
         .author("Audio Engineer")
         .about("Interrogates Linux audio devices for their capabilities")
-        .arg(Arg::new("json")
-            .short('j')
-            .long("json")
-            .action(clap::ArgAction::SetTrue)
-            .help("Output results in JSON format"))
-        .arg(Arg::new("verbose")
-            .short('v')
-            .long("verbose")
-            .action(clap::ArgAction::SetTrue)
-            .help("Enable verbose output"))
-        .arg(Arg::new("all")
-            .short('a')
-            .long("all")
-            .action(clap::ArgAction::SetTrue)
-            .help("Show all devices including duplicates and virtual devices"))
-        .arg(Arg::new("card")
-            .short('c')
-            .long("card")
-            .value_name("CARD_ID")
-            .help("Filter by specific card ID (e.g., card0, card1, or just 0, 1)"))
-        .arg(Arg::new("device")
-            .short('d')
-            .long("device")
-            .value_name("DEVICE_NAME")
-            .help("Filter by device name (partial match, case-insensitive)"))
-        .arg(Arg::new("list-cards")
-            .short('l')
-            .long("list")
-            .action(clap::ArgAction::SetTrue)
-            .help("List available card IDs and exit (cards are shown by default)"))
-        .arg(Arg::new("no-proc")
-            .long("no-proc")
-            .action(clap::ArgAction::SetTrue)
-            .help("Disable /proc/asound access to prevent interfering with active audio streams"))
+        .arg(
+            Arg::new("json")
+                .short('j')
+                .long("json")
+                .action(clap::ArgAction::SetTrue)
+                .help("Output results in JSON format"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable verbose output"),
+        )
+        .arg(
+            Arg::new("all")
+                .short('a')
+                .long("all")
+                .action(clap::ArgAction::SetTrue)
+                .help("Show all devices including duplicates and virtual devices"),
+        )
+        .arg(
+            Arg::new("card")
+                .short('c')
+                .long("card")
+                .value_name("CARD_ID")
+                .help("Filter by specific card ID (e.g., card0, card1, or just 0, 1)"),
+        )
+        .arg(
+            Arg::new("device")
+                .short('d')
+                .long("device")
+                .value_name("DEVICE_NAME")
+                .help("Filter by device name (partial match, case-insensitive)"),
+        )
+        .arg(
+            Arg::new("list-cards")
+                .short('l')
+                .long("list")
+                .action(clap::ArgAction::SetTrue)
+                .help("List available card IDs and exit (cards are shown by default)"),
+        )
+        .arg(
+            Arg::new("no-proc")
+                .long("no-proc")
+                .action(clap::ArgAction::SetTrue)
+                .help("Disable /proc/asound access to prevent interfering with active audio streams"),
+        )
         .get_matches();
 
     let json_output = matches.get_flag("json");
@@ -455,15 +469,15 @@ fn filter_devices(
         let card_mapping = get_card_mapping().unwrap_or_default();
         let target_card_name = card_mapping.get(card_num).cloned();
 
-        filtered = filtered.into_iter().filter(|device| {
+        filtered.retain(|device| {
             // Match by card number in various formats
             device.name.contains(&format!("hw:{}", card_num)) ||
             device.name.contains(&format!("card{}", card_num)) ||
             // Match by card name if we found it
-            (target_card_name.as_ref().map_or(false, |name| device.name.contains(&format!("CARD={}", name)))) ||
+            (target_card_name.as_ref().is_some_and(|name| device.name.contains(&format!("CARD={}", name)))) ||
             // Direct match for card name
             device.name.contains(&format!("CARD={}", card_id))
-        }).collect();
+        });
     }
 
     // Apply device name filter
@@ -471,7 +485,7 @@ fn filter_devices(
         let name_lower = name_filter.to_lowercase();
         let card_descriptions = get_card_descriptions().unwrap_or_default();
 
-        filtered = filtered.into_iter().filter(|device| {
+        filtered.retain(|device| {
             // First check device name
             if device.name.to_lowercase().contains(&name_lower) {
                 return true;
@@ -486,13 +500,13 @@ fn filter_devices(
             }
 
             false
-        }).collect();
+        });
     }
 
     // If not showing all, remove common duplicates
     if !show_all {
         let mut seen_names = HashSet::new();
-        filtered = filtered.into_iter().filter(|device| {
+        filtered.retain(|device| {
             // Skip obvious virtual/duplicate devices unless specifically requested
             if device.name.starts_with("dmix:") ||
                device.name.starts_with("dsnoop:") ||
@@ -514,7 +528,7 @@ fn filter_devices(
                 seen_names.insert(simplified_name);
                 true
             }
-        }).collect();
+        });
     }
 
     filtered
@@ -576,32 +590,27 @@ fn get_proc_alsa_devices_safe() -> Result<Vec<AudioDeviceInfo>> {
 
     // Check /proc/asound/ for card directories
     if let Ok(entries) = fs::read_dir("/proc/asound/") {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let name = entry.file_name();
-                if let Some(name_str) = name.to_str() {
-                    if name_str.starts_with("card") {
-                        let card_num = &name_str[4..];
-                        let card_path = format!("/proc/asound/{}", name_str);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str() {
+                if let Some(card_num) = name_str.strip_prefix("card") {
+                    let card_path = format!("/proc/asound/{}", name_str);
 
-                        // Check for PCM devices
-                        if let Ok(card_entries) = fs::read_dir(&card_path) {
-                            for card_entry in card_entries {
-                                if let Ok(card_entry) = card_entry {
-                                    let pcm_name = card_entry.file_name();
-                                    if let Some(pcm_str) = pcm_name.to_str() {
-                                        // Check for playback devices (pcmXp)
-                                        if pcm_str.starts_with("pcm") && pcm_str.ends_with("p") {
-                                            if let Some(device_info) = read_pcm_info_safe(&card_path, pcm_str, "PLAYBACK", card_num) {
-                                                devices.push(device_info);
-                                            }
-                                        }
-                                        // Check for capture devices (pcmXc)
-                                        if pcm_str.starts_with("pcm") && pcm_str.ends_with("c") {
-                                            if let Some(device_info) = read_pcm_info_safe(&card_path, pcm_str, "CAPTURE", card_num) {
-                                                devices.push(device_info);
-                                            }
-                                        }
+                    // Check for PCM devices
+                    if let Ok(card_entries) = fs::read_dir(&card_path) {
+                        for card_entry in card_entries.flatten() {
+                            let pcm_name = card_entry.file_name();
+                            if let Some(pcm_str) = pcm_name.to_str() {
+                                // Check for playback devices (pcmXp)
+                                if pcm_str.starts_with("pcm") && pcm_str.ends_with("p") {
+                                    if let Some(device_info) = read_pcm_info_safe(&card_path, pcm_str, "PLAYBACK", card_num) {
+                                        devices.push(device_info);
+                                    }
+                                }
+                                // Check for capture devices (pcmXc)
+                                if pcm_str.starts_with("pcm") && pcm_str.ends_with("c") {
+                                    if let Some(device_info) = read_pcm_info_safe(&card_path, pcm_str, "CAPTURE", card_num) {
+                                        devices.push(device_info);
                                     }
                                 }
                             }
@@ -632,7 +641,7 @@ fn read_pcm_info_safe(card_path: &str, pcm_dir: &str, stream_type: &str, card_nu
 
         // Get card name from card mapping
         let card_mapping = get_card_mapping().unwrap_or_default();
-        let card_name = card_mapping.get(card_num).cloned().unwrap_or_else(|| format!("card{}", card_num));
+        let _card_name = card_mapping.get(card_num).cloned().unwrap_or_else(|| format!("card{}", card_num));
 
         let device_name = format!("hw:{},{}", card_num, device_num);
         let mut device = AudioDeviceInfo::new(device_name, "ALSA".to_string());
@@ -740,13 +749,11 @@ fn list_available_cards() -> Result<()> {
 
     if let Ok(entries) = fs::read_dir("/proc/asound/") {
         let mut cards = Vec::new();
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let name = entry.file_name();
-                if let Some(name_str) = name.to_str() {
-                    if name_str.starts_with("card") {
-                        cards.push(name_str.to_string());
-                    }
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str() {
+                if name_str.starts_with("card") {
+                    cards.push(name_str.to_string());
                 }
             }
         }
