@@ -1,0 +1,219 @@
+name: Automated Dependency Updates
+
+on:
+  schedule:
+    # Run every Monday at 9 AM UTC
+    - cron: "0 9 * * 1"
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  update-dependencies:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-edit and cargo-outdated
+        run: |
+          cargo install cargo-edit cargo-outdated
+
+      - name: Check for outdated dependencies
+        id: check-outdated
+        run: |
+          echo "Checking for outdated dependencies..."
+          cargo outdated --exit-code 1 > outdated.txt 2>&1 || echo "outdated=true" >> $GITHUB_OUTPUT
+          if [ -f outdated.txt ]; then
+            echo "outdated-info<<EOF" >> $GITHUB_OUTPUT
+            cat outdated.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update dependencies
+        if: steps.check-outdated.outputs.outdated == 'true'
+        run: |
+          echo "Updating dependencies..."
+          # Update to latest compatible versions (respects semver)
+          cargo update
+
+          # Optionally, upgrade to latest versions (breaking changes possible)
+          # Uncomment the next lines if you want more aggressive updates
+          # cargo upgrade --workspace
+
+          # Format any changes
+          cargo fmt
+
+      - name: Run tests
+        if: steps.check-outdated.outputs.outdated == 'true'
+        run: |
+          cargo test --verbose
+          cargo clippy -- -D warnings
+
+      - name: Check if there are changes
+        if: steps.check-outdated.outputs.outdated == 'true'
+        id: verify-changed-files
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Files changed:"
+            git status --porcelain
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No files changed"
+          fi
+
+      - name: Get current date
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Bump version
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        id: bump-version
+        run: |
+          # Get current version
+          current_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Current version: $current_version"
+
+          # Extract version components
+          IFS='.' read -ra VERSION_PARTS <<< "$current_version"
+          major=${VERSION_PARTS[0]}
+          minor=${VERSION_PARTS[1]}
+          patch=${VERSION_PARTS[2]}
+
+          # Bump patch version for dependency updates
+          new_patch=$((patch + 1))
+          new_version="$major.$minor.$new_patch"
+
+          echo "New version: $new_version"
+          echo "new-version=$new_version" >> $GITHUB_OUTPUT
+
+          # Update version in Cargo.toml
+          sed -i "s/version = \"$current_version\"/version = \"$new_version\"/" Cargo.toml
+
+          # Update Cargo.lock
+          cargo check
+
+      - name: Create Pull Request
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            chore: update dependencies and bump version to ${{ steps.bump-version.outputs.new-version }}
+
+            Automated dependency update performed on ${{ steps.date.outputs.date }}.
+
+            Outdated dependencies found:
+            ${{ steps.check-outdated.outputs.outdated-info }}
+          title: "chore: automated dependency update (${{ steps.date.outputs.date }})"
+          body: |
+            ## Automated Dependency Update
+
+            This PR was automatically created by the dependency update workflow.
+
+            ### Changes Made:
+            - 📦 Updated dependencies to latest compatible versions
+            - 🔢 Bumped version from current to `${{ steps.bump-version.outputs.new-version }}`
+            - ✅ All tests pass
+            - 🧹 Code formatted with rustfmt
+            - 📋 Clippy checks pass
+
+            ### Outdated Dependencies:
+            ```
+            ${{ steps.check-outdated.outputs.outdated-info }}
+            ```
+
+            ### Review Checklist:
+            - [ ] Review dependency changes for security implications
+            - [ ] Verify all tests pass
+            - [ ] Check for any breaking changes in updated dependencies
+            - [ ] Review changelog entries if applicable
+
+            This PR will be automatically created weekly if dependencies are outdated.
+          branch: automated-dependency-update-${{ steps.date.outputs.date }}
+          delete-branch: true
+          draft: false
+          labels: |
+            dependencies
+            automated
+            maintenance
+
+      - name: Enable auto-merge for dependency updates
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.create-pull-request.outputs.pull-request-number }}
+          merge-method: squash
+
+  notify-on-failure:
+    runs-on: ubuntu-latest
+    needs: update-dependencies
+    if: failure()
+
+    steps:
+      - name: Create Issue on Failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Dependency Update Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            ## Automated Dependency Update Failed
+
+            The weekly dependency update workflow failed on ${new Date().toISOString()}.
+
+            **Workflow Run:** [${context.runId}](${context.payload.repository.html_url}/actions/runs/${context.runId})
+
+            Please check the workflow logs for details and resolve any issues.
+
+            ### Possible Issues:
+            - Tests failing due to breaking changes
+            - Compilation errors
+            - Network issues during dependency fetching
+            - Clippy warnings/errors
+
+            This issue was automatically created by the dependency update workflow.
+            `;
+
+            // Check if a similar issue already exists
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['dependency-update-failure', 'automated'],
+              state: 'open'
+            });
+
+            if (existingIssues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['bug', 'dependency-update-failure', 'automated']
+              });
+            }
